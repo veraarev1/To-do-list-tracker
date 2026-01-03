@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react'
+import { db } from './firebase'
+import { collection, doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore'
 import './App.css'
 
 type FrequencyUnit = 'hours' | 'days' | 'weeks' | 'months'
@@ -12,7 +14,7 @@ interface Todo {
   createdAt: number
 }
 
-const STORAGE_KEY = 'japanese-todo-tracker'
+const COLLECTION = 'todos'
 
 const frequencyToMs = (f: { value: number; unit: FrequencyUnit }) => {
   const ms = { hours: 3600000, days: 86400000, weeks: 604800000, months: 2592000000 }
@@ -52,67 +54,74 @@ const formatRelative = (ts: number) => {
 }
 
 function App() {
-  const [todos, setTodos] = useState<Todo[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    return saved ? JSON.parse(saved) : []
-  })
+  const [todos, setTodos] = useState<Todo[]>([])
 
+  // Load todos from Firestore on mount
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(todos))
-  }, [todos])
+    const unsubscribe = onSnapshot(collection(db, COLLECTION), (snapshot) => {
+      const items = snapshot.docs.map(doc => doc.data() as Todo)
+      setTodos(items)
+    })
+    return () => unsubscribe()
+  }, [])
 
-  const addTodo = () => {
+  const saveTodo = async (todo: Todo) => {
+    try {
+      await setDoc(doc(db, COLLECTION, todo.id), todo)
+      console.log('Saved todo:', todo.id)
+    } catch (error) {
+      console.error('Error saving todo:', error)
+    }
+  }
+
+  const addTodo = async () => {
     const now = Date.now()
     const freq = { value: 1, unit: 'days' as FrequencyUnit }
-    setTodos([...todos, {
+    const todo: Todo = {
       id: crypto.randomUUID(),
       event: 'New Task',
       frequency: freq,
       lastExecuteTime: now,
       nextExecuteTime: now + frequencyToMs(freq),
       createdAt: now
-    }])
+    }
+    await saveTodo(todo)
   }
 
-  const updateTodo = (id: string, updates: Partial<Todo>) => {
-    setTodos(todos.map(t => {
-      if (t.id !== id) return t
-      const updated = { ...t, ...updates }
-      // Recalculate nextExecuteTime if frequency or lastExecuteTime changed
-      if (updates.frequency || updates.lastExecuteTime !== undefined) {
-        const base = updated.lastExecuteTime ?? t.createdAt
-        updated.nextExecuteTime = base + frequencyToMs(updated.frequency)
-      }
-      return updated
-    }))
+  const updateTodo = async (id: string, updates: Partial<Todo>) => {
+    const todo = todos.find(t => t.id === id)
+    if (!todo) return
+    const updated = { ...todo, ...updates }
+    if (updates.frequency || updates.lastExecuteTime !== undefined) {
+      const base = updated.lastExecuteTime ?? todo.createdAt
+      updated.nextExecuteTime = base + frequencyToMs(updated.frequency)
+    }
+    await saveTodo(updated)
   }
 
-  const complete = (id: string) => {
+  const complete = async (id: string) => {
+    const todo = todos.find(t => t.id === id)
+    if (!todo) return
     const now = Date.now()
-    setTodos(todos.map(t => {
-      if (t.id !== id) return t
-      return {
-        ...t,
-        lastExecuteTime: now,
-        nextExecuteTime: now + frequencyToMs(t.frequency)
-      }
-    }))
+    await saveTodo({
+      ...todo,
+      lastExecuteTime: now,
+      nextExecuteTime: now + frequencyToMs(todo.frequency)
+    })
   }
 
-  const skip = (id: string) => {
+  const skip = async (id: string) => {
+    const todo = todos.find(t => t.id === id)
+    if (!todo) return
     const now = Date.now()
-    setTodos(todos.map(t => {
-      if (t.id !== id) return t
-      // Skip: don't update lastExecuteTime, only push nextExecuteTime forward
-      return {
-        ...t,
-        nextExecuteTime: now + frequencyToMs(t.frequency)
-      }
-    }))
+    await saveTodo({
+      ...todo,
+      nextExecuteTime: now + frequencyToMs(todo.frequency)
+    })
   }
 
-  const remove = (id: string) => {
-    setTodos(todos.filter(t => t.id !== id))
+  const remove = async (id: string) => {
+    await deleteDoc(doc(db, COLLECTION, id))
   }
 
   const sorted = [...todos].sort((a, b) => a.nextExecuteTime - b.nextExecuteTime)
